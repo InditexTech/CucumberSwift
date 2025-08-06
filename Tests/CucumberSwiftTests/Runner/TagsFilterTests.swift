@@ -252,7 +252,73 @@ class TagsFilterTests {
             env: "@dev or @staging and @smoke",
             tags: ["production"],
             expected: false,
-            desc: "Should NOT match: neither dev nor (staging and smoke)")
+            desc: "Should NOT match: neither dev nor (staging and smoke)"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke)",
+                    tags: ["pre", "smoke"],
+                    expected: true,
+                    desc: "Should match: @env and single tag in parenthesis"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke)",
+                    tags: ["pro", "smoke"],
+                    expected: false,
+                    desc: "Should NOT match: @env and single tag in parenthesis"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke or @sanity)",
+                    tags: ["pre", "smoke"],
+                    expected: true,
+                    desc: "Should match: @env and multiple tags in parenthesis with one tag"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke or @sanity)",
+                    tags: ["pro", "sanity"],
+                    expected: false,
+                    desc: "Should NOT match: @env and multiple tags in parenthesis with one tag"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke and @feature)",
+                    tags: ["pre", "smoke", "feature"],
+                    expected: true,
+                    desc: "Should match: @env and multiple tags in parenthesis with all tags"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke and @feature)",
+                    tags: ["pro", "feature"],
+                    expected: false,
+                    desc: "Should NOT match: @env and multiple tags in parenthesis with all tags"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke and (@feature1 or @feature2))",
+                    tags: ["pre", "smoke", "feature1"],
+                    expected: true,
+                    desc: "Should match: @env and nested tags in parenthesis with one tag"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@smoke and (@feature1 or @feature2))",
+                    tags: ["pro", "feature2"],
+                    expected: false,
+                    desc: "Should NOT match: @env and nested tags in parenthesis with one tag"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@feature or (@smoke and @sanity))",
+                    tags: ["pre", "feature"],
+                    expected: true,
+                    desc: "Should match: @env and nested tags with OR condition"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@feature or (@smoke and @sanity))",
+                    tags: ["pre", "smoke", "sanity"],
+                    expected: true,
+                    desc: "Should match: @env and nested tags with OR condition"),
+
+        TagsFilterTestCase(
+                    env: "@pre and (@feature or (@smoke and @sanity))",
+                    tags: ["pro", "sanity"],
+                    expected: false,
+                    desc: "Should NOT match: @env and nested tags with OR condition")
     ] as [TagsFilterTestCase])
     func shouldRunWithParameterized(testCase: TagsFilterTestCase) {
         if let env = testCase.env {
