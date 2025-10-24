@@ -9,6 +9,17 @@
 import Foundation
 import XCTest
 
+// Custom error for retryable failures (doesn't record as XCTest failure)
+struct RetryableFailure: Error {
+    let message: String
+    let sourceLocation: SourceLocation
+}
+
+struct SourceLocation {
+    let file: StaticString
+    let line: UInt
+}
+
 open class CucumberTest: XCTestCase {
     static var didRun = false
 
@@ -66,8 +77,15 @@ open class CucumberTest: XCTestCase {
             print("📊 Total features found: \(Cucumber.shared.features.count)")
 
             // ✅ Leer retry count una sola vez
+            // Read retry count once
             let retryCount = ProcessInfo.processInfo.environment["CUCUMBER_RETRY_COUNT"]
                 .flatMap { Int($0) } ?? 0
+            
+            if retryCount > 0 {
+                print("🔁 Retry mode ENABLED: CUCUMBER_RETRY_COUNT=\(retryCount) (will retry up to \(retryCount) times on failure)")
+            } else {
+                print("✅ Retry mode DISABLED: CUCUMBER_RETRY_COUNT=0 (no retries, original behavior)")
+            }
 
             for feature in Cucumber.shared.features.taggedElements(with: Cucumber.shared.environment, askImplementor: false) {
                 print("🎯 Processing feature: \(feature.title) with \(feature.scenarios.count) scenarios")
@@ -86,14 +104,14 @@ open class CucumberTest: XCTestCase {
                 let scenarios = feature.scenarios.taggedElements(with: Cucumber.shared.environment, askImplementor: true)
 
                 for (index, scenario) in scenarios.enumerated() {
-                    // ✅ Si NO hay retries, usar método original sin modificaciones
+                    // If no retries, use original method without modifications
                     if retryCount == 0 {
                         if let testCase = createTestCaseForScenario(testCaseClass: testCaseClass, scenario: scenario, scenarioIndex: index, totalScenarios: scenarios.count, feature: feature) {
                             featureSuite.addTest(testCase)
                         }
                     } else {
-                        // ✅ Con retries: crear suite con múltiples tests
-                        let scenarioSuite = createScenarioTestSuiteWithRetries(
+                        // With retries: create one single test that handles retries internally
+                        let testCase = createScenarioTestSuiteWithRetries(
                             testCaseClass: testCaseClass,
                             scenario: scenario,
                             scenarioIndex: index,
@@ -101,7 +119,7 @@ open class CucumberTest: XCTestCase {
                             feature: feature,
                             retryCount: retryCount
                         )
-                        featureSuite.addTest(scenarioSuite)
+                        featureSuite.addTest(testCase)
                     }
                 }
 
@@ -113,155 +131,240 @@ open class CucumberTest: XCTestCase {
         }
     }
 
-    // MARK: - Retry Logic (NEW)
+    // MARK: - Helper: Execute Single Scenario Attempt
+    
+    private static func executeScenarioAttempt(scenario: Scenario,
+                                               attemptNumber: Int,
+                                               maxAttempts: Int,
+                                               shouldReportSteps: Bool,
+                                               firstFailureMessage: inout String?) -> (failed: Bool, skipped: Bool, passed: Bool) {
+        
+        let result = (try? XCTContext.runActivity(named: attemptNumber == 1 ? "Initial Attempt" : "Retry \(attemptNumber - 1)") { activity -> (failed: Bool, skipped: Bool, passed: Bool) in
+            
+            Cucumber.shared.beforeScenarioHooks.forEach { $0.hook(scenario) }
+            
+            var attemptFailed = false
+            var attemptSkipped = false
+            
+            for step in scenario.steps {
+                step.result = .pending
+            }
+            
+            for step in scenario.steps {
+                let startTime = Date()
+                step.startTime = startTime
+                Cucumber.shared.currentStep = step
+                
+                if shouldReportSteps {
+                    Cucumber.shared.reporters.forEach { $0.didStart(step: step, at: startTime) }
+                }
+                Cucumber.shared.beforeStepHooks.forEach { $0.hook(step) }
+                
+                do {
+                    try XCTContext.runActivity(named: "\(step.keyword.toString()) \(step.match)") { _ in
+                        do {
+                            try step.run()
+                        } catch let error as XCTSkip {
+                            attemptSkipped = true
+                            step.result = .skipped
+                            throw error
+                        } catch {
+                            attemptFailed = true
+                            step.result = .failed
+                            if firstFailureMessage == nil {
+                                firstFailureMessage = "\(error)"
+                            }
+                        }
+                    }
+                } catch is XCTSkip {
+                    attemptSkipped = true
+                    step.result = .skipped
+                }
+                
+                step.endTime = Date()
+                (step.executeInstance as? XCTestCase)?.tearDown()
+                Cucumber.shared.afterStepHooks.forEach { $0.hook(step) }
+                
+                if shouldReportSteps {
+                    Cucumber.shared.reporters.forEach {
+                        $0.didFinish(step: step, result: step.result, duration: step.executionDuration)
+                    }
+                }
+                
+                if step.result == .failed || step.result == .skipped {
+                    break
+                }
+            }
+            
+            Cucumber.shared.afterScenarioHooks.forEach { $0.hook(scenario) }
+            
+            let hasFailedStep = scenario.steps.contains { $0.result == .failed }
+            let hasSkippedStep = scenario.steps.contains { $0.result == .skipped }
+            let allStepsPassed = scenario.steps.allSatisfy { $0.result == .passed }
+            
+            let actuallyFailed = attemptFailed || hasFailedStep
+            let actuallySkipped = attemptSkipped || hasSkippedStep
+            let actuallyPassed = allStepsPassed && !actuallyFailed && !actuallySkipped
+            
+            if actuallyPassed && attemptNumber > 1 {
+                let successMessage = "✅ Success on Retry \(attemptNumber - 1)"
+                let successAttachment = XCTAttachment(string: "Test passed after \(attemptNumber - 1) previous failure(s)")
+                successAttachment.name = successMessage
+                successAttachment.lifetime = .keepAlways
+                activity.add(successAttachment)
+                print("    \(successMessage) - Test recovered after initial failure")
+            }
+            
+            return (failed: actuallyFailed, skipped: actuallySkipped, passed: actuallyPassed)
+        }) ?? {
+            return (failed: true, skipped: false, passed: false)
+        }()
+        
+        return result
+    }
+
+    // MARK: - Retry Logic (CONDITIONAL - Only retry on failure)
 
     private static func createScenarioTestSuiteWithRetries(testCaseClass: XCTestCase.Type,
                                                             scenario: Scenario,
                                                             scenarioIndex: Int,
                                                             totalScenarios: Int,
                                                             feature: Feature,
-                                                            retryCount: Int) -> XCTestSuite {
-        let scenarioSuite = XCTestSuite(name: scenario.title.toClassString())
-        let totalAttempts = 1 + retryCount
-
-        var scenarioPassed = false
-        var attemptsExecuted = 0
-        let passedLock = NSLock()
+                                                            retryCount: Int) -> XCTestCase {
+        // Safety check: if retryCount is 0, this should never be called, but handle it anyway
+        guard retryCount > 0 else {
+            print("⚠️ Warning: createScenarioTestSuiteWithRetries called with retryCount=0, falling back to original method")
+            return createTestCaseForScenario(testCaseClass: testCaseClass, scenario: scenario, scenarioIndex: scenarioIndex, totalScenarios: totalScenarios, feature: feature) ?? testCaseClass.init(selector: #selector(CucumberTest.testGherkin))
+        }
+        
+        let maxRetries = retryCount
         let isLastScenario = scenarioIndex == totalScenarios - 1
-
-        for attempt in 1...totalAttempts {
-            let retryName = "Retry\(attempt)"
-
-            let method = TestCaseMethod(withName: retryName) {
-                passedLock.lock()
-                let alreadyPassed = scenarioPassed
-                let currentAttempt = attemptsExecuted + 1
-                passedLock.unlock()
-
-                // ✅ Si ya pasó en un intento anterior, no ejecutar nada
-                guard !alreadyPassed else {
-                    // Test vacío - durará ~0.0s
-                    print("⏭️ Skipping Retry\(attempt) - scenario already passed on attempt \(attemptsExecuted)")
-                    return
-                }
-
-                passedLock.lock()
-                attemptsExecuted = currentAttempt
-                passedLock.unlock()
-
-                XCTContext.runActivity(named: "Retry") { retryActivity in
-                    // Execute before feature hooks if this is the first scenario and first attempt
-                    if attempt == 1 {
-                        if let firstScenario = feature.scenarios.first, firstScenario === scenario {
-                            feature.startDate = Date()
-                            Cucumber.shared.reporters.forEach { $0.didStart(feature: feature, at: feature.startDate) }
-                            Cucumber.shared.beforeFeatureHooks.forEach { $0.hook(feature) }
-                        }
-
-                        // Solo reportar didStart del scenario en el primer intento
-                        scenario.startDate = Date()
-                        Cucumber.shared.reporters.forEach { $0.didStart(scenario: scenario, at: scenario.startDate) }
-                    } else {
-                        // En reintentos, actualizar el startDate pero no reportar didStart
-                        scenario.startDate = Date()
-                    }
-
-                    Cucumber.shared.beforeScenarioHooks.forEach { $0.hook(scenario) }
-
-                    var failedInThisAttempt = false
-
-                    // ✅ Limpiar resultados de steps anteriores
+        
+        // Create a single test method that handles retries internally
+        let testMethodName = "test\(scenario.title.toClassString())"
+        
+        let method = TestCaseMethod(withName: testMethodName) {
+            var attemptNumber = 0
+            var testPassed = false
+            var firstFailureMessage: String?
+            
+            // Execute before feature hooks if this is the first scenario
+            if let firstScenario = feature.scenarios.first, firstScenario === scenario {
+                feature.startDate = Date()
+                Cucumber.shared.reporters.forEach { $0.didStart(feature: feature, at: feature.startDate) }
+                Cucumber.shared.beforeFeatureHooks.forEach { $0.hook(feature) }
+            }
+            
+            // Report scenario start once
+            scenario.startDate = Date()
+            Cucumber.shared.reporters.forEach { $0.didStart(scenario: scenario, at: scenario.startDate) }
+            
+            let maxAttempts = 1 + maxRetries
+            
+            while attemptNumber < maxAttempts && !testPassed {
+                attemptNumber += 1
+                
+                let isLastAttempt = (attemptNumber == maxAttempts)
+                
+                let attemptResult = executeScenarioAttempt(scenario: scenario,
+                                                          attemptNumber: attemptNumber,
+                                                          maxAttempts: maxAttempts,
+                                                          shouldReportSteps: isLastAttempt,
+                                                          firstFailureMessage: &firstFailureMessage)
+                
+                // If test passed on a non-last attempt, we need to report those steps now
+                if !isLastAttempt && attemptResult.passed {
                     for step in scenario.steps {
-                        step.result = .pending
-                    }
-
-                    for step in scenario.steps {
-                        let startTime = Date()
-                        step.startTime = startTime
-                        Cucumber.shared.currentStep = step
-
-                        // ✅ Reportar inicio del step DURANTE la ejecución (para logs)
-                        Cucumber.shared.reporters.forEach { $0.didStart(step: step, at: startTime) }
-
-                        Cucumber.shared.beforeStepHooks.forEach { $0.hook(step) }
-
-                        XCTContext.runActivity(named: "\(step.keyword.toString()) \(step.match)") { _ in
-                            XCTAssertNoThrow(try? step.run())
-                        }
-                        step.endTime = Date()
-
-                        (step.executeInstance as? XCTestCase)?.tearDown()
-                        Cucumber.shared.afterStepHooks.forEach { $0.hook(step) }
-
-                        // ✅ Reportar fin del step DURANTE la ejecución (para logs)
-                        Cucumber.shared.reporters.forEach {
-                            $0.didFinish(step: step, result: step.result, duration: step.executionDuration)
-                        }
-
-                        if step.result == .failed {
-                            failedInThisAttempt = true
-                            break
-                        }
-                    }
-
-                    Cucumber.shared.afterScenarioHooks.forEach { $0.hook(scenario) }
-
-                    let scenarioResult: Reporter.Result = failedInThisAttempt ? .failed : .passed
-
-                    // ✅ Reportar fin del scenario solo si es el intento final
-                    if !failedInThisAttempt || attempt == totalAttempts {
-                        Cucumber.shared.reporters.forEach {
-                            $0.didFinish(scenario: scenario,
-                                         result: scenarioResult,
-                                         duration: Measurement(value: Date().timeIntervalSince(scenario.startDate), unit: .seconds))
-                        }
-
-                        // Execute after feature hooks if this is the last scenario
-                        if isLastScenario && (!failedInThisAttempt || attempt == totalAttempts) {
-                            Cucumber.shared.afterFeatureHooks.forEach { $0.hook(feature) }
-                            let featureResult: Reporter.Result =
-                                (feature.scenarios.contains { $0.steps.contains { $0.result == .failed } }) ? .failed : .passed
+                        if step.result != .pending {
                             Cucumber.shared.reporters.forEach {
-                                $0.didFinish(feature: feature,
-                                             result: featureResult,
-                                             duration: Measurement(value: Date().timeIntervalSince(feature.startDate), unit: .seconds))
+                                $0.didStart(step: step, at: step.startTime ?? Date())
+                                $0.didFinish(step: step, result: step.result, duration: step.executionDuration)
                             }
                         }
                     }
-
-                    let resultInfo = failedInThisAttempt ? "❌ Retry \(attempt) failed" : "✅ Retry \(attempt) passed"
-                    let resultAttachment = XCTAttachment(string: resultInfo)
-                    resultAttachment.name = "Retry \(attempt) Result"
-                    resultAttachment.lifetime = .keepAlways
-                    retryActivity.add(resultAttachment)
-
-                    if !failedInThisAttempt {
-                        passedLock.lock()
-                        scenarioPassed = true
-                        passedLock.unlock()
-
-                        if attempt > 1 {
-                            print("✅ Scenario '\(scenario.title)' passed on retry #\(attempt - 1) (attempt \(attempt)/\(totalAttempts))")
+                }
+                
+                if attemptResult.passed {
+                    testPassed = true
+                    if attemptNumber > 1 {
+                        
+                        // Success is already recorded inside the "Retry N" activity
+                        // Now add flaky marker attachments for reporting
+                        let flakyMetadata = XCTAttachment(string: """
+                        FLAKY_TEST_METADATA
+                        testName: \(scenario.title)
+                        retries: \(maxRetries)
+                        actualRetries: \(attemptNumber - 1)
+                        firstFailure: \(firstFailureMessage ?? "unknown")
+                        """)
+                        flakyMetadata.name = "CUCUMBER_FLAKY_METADATA"
+                        flakyMetadata.lifetime = .keepAlways
+                        
+                        let flakyWarning = XCTAttachment(string: "🔀 FLAKY: Test passed after \(attemptNumber - 1) retry(ies)")
+                        flakyWarning.name = "Flaky Test Warning"
+                        flakyWarning.lifetime = .keepAlways
+                        
+                        XCTContext.runActivity(named: "Flaky Test Detected") { activity in
+                            activity.add(flakyMetadata)
+                            activity.add(flakyWarning)
                         }
-                    } else {
-                        print("⚠️ Scenario '\(scenario.title)' failed on attempt \(attempt)/\(totalAttempts)")
-
-                        if attempt == totalAttempts {
-                            XCTFail("Scenario '\(scenario.title)' failed after \(retryCount) retries (\(totalAttempts) total attempts)")
+                        
+                        // Add summary activity
+                        XCTContext.runActivity(named: "📊 Summary: Scenario '\(scenario.title)' succeeded after \(attemptNumber) attempts (\(attemptNumber - 1) retries)") { summaryActivity in
+                            let summaryText = """
+                            Total attempts: \(attemptNumber)
+                            Retries: \(attemptNumber - 1)
+                            Final status: PASSED (FLAKY)
+                            First failure: \(firstFailureMessage ?? "unknown")
+                            """
+                            let summaryAttachment = XCTAttachment(string: summaryText)
+                            summaryAttachment.name = "Flaky Test Summary"
+                            summaryAttachment.lifetime = .keepAlways
+                            summaryActivity.add(summaryAttachment)
                         }
+                    }
+                    break
+                } else if attemptResult.failed {
+                    if attemptNumber >= maxAttempts {
+                        break
                     }
                 }
             }
-
-            guard let selector = TestCaseGenerator.addTestMethod(testCase: testCaseClass, method: method) else {
-                continue
+            
+            let finalResult: Reporter.Result
+            if testPassed {
+                finalResult = .passed
+            } else {
+                finalResult = .failed
+                // Only report failure if all retry attempts were exhausted
+                XCTFail("Scenario '\(scenario.title)' failed after \(attemptNumber) attempts (\(maxRetries) retries)")
             }
-
-            let testCase = testCaseClass.init(selector: selector)
-            scenarioSuite.addTest(testCase)
+            
+            Cucumber.shared.reporters.forEach {
+                $0.didFinish(scenario: scenario,
+                             result: finalResult,
+                             duration: Measurement(value: Date().timeIntervalSince(scenario.startDate), unit: .seconds))
+            }
+            
+            // Execute after feature hooks if this is the last scenario
+            if isLastScenario {
+                Cucumber.shared.afterFeatureHooks.forEach { $0.hook(feature) }
+                let featureResult: Reporter.Result =
+                    (feature.scenarios.contains { $0.steps.contains { $0.result == .failed } }) ? .failed : .passed
+                Cucumber.shared.reporters.forEach {
+                    $0.didFinish(feature: feature,
+                                 result: featureResult,
+                                 duration: Measurement(value: Date().timeIntervalSince(feature.startDate), unit: .seconds))
+                }
+            }
         }
-
-        return scenarioSuite
+        
+        guard let selector = TestCaseGenerator.addTestMethod(testCase: testCaseClass, method: method) else {
+            return createTestCaseForScenario(testCaseClass: testCaseClass, scenario: scenario, scenarioIndex: scenarioIndex, totalScenarios: totalScenarios, feature: feature) ?? testCaseClass.init(selector: #selector(CucumberTest.testGherkin))
+        }
+        
+        let testCase = testCaseClass.init(selector: selector)
+        return testCase
     }
 
     // MARK: - Original Methods (UNCHANGED)

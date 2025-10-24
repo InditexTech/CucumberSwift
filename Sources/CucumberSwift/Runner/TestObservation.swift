@@ -13,10 +13,20 @@ extension Cucumber: XCTestObservation {
     public func testBundleDidFinish(_ testBundle: Bundle) {
         reporters.forEach { $0.testSuiteFinished(at: Date()) }
         let name = Cucumber.shared.reportName.appending(String(testBundle.bundleURL.lastPathComponent.prefix { $0 != "." })).appending(".json")
+        
         if  let documentDirectory = try? FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: false),
             let reportURL = Reporter.reportURL {
             let fileURL = documentDirectory.appendingPathComponent(name)
-            try? FileManager.default.copyItem(at: reportURL, to: fileURL)
+            
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                try? FileManager.default.removeItem(at: fileURL)
+            }
+            
+            do {
+                try FileManager.default.copyItem(at: reportURL, to: fileURL)
+            } catch {
+                print("Error copying Cucumber report: \(error)")
+            }
         }
     }
 

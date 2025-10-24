@@ -55,8 +55,19 @@ public class CucumberJSONReporter: CucumberTestObserver {
 
     public func didStart(step: CucumberSwift.Step, at date: Date) {
         defer { try? encoder.encode(features).write(to: reportURL) }
-        guard let targetScenario = findScenario(for: step) else { return }
-        targetScenario.steps.append(Step(step))
+        
+        guard let targetScenario = findScenario(for: step) else {
+            return
+        }
+        
+        // Check if this step already exists (handles retry scenarios)
+        // If it exists, we'll just update it on didFinish to avoid duplicates
+        if findStep(for: step) != nil {
+            return
+        }
+        
+        let newStep = Step(step)
+        targetScenario.steps.append(newStep)
     }
 
     public func didFinish(feature: CucumberSwift.Feature, result: Reporter.Result, duration: Measurement<UnitDuration>) {
@@ -69,7 +80,11 @@ public class CucumberJSONReporter: CucumberTestObserver {
 
     public func didFinish(step: CucumberSwift.Step, result: Reporter.Result, duration: Measurement<UnitDuration>) {
         defer { try? encoder.encode(features).write(to: reportURL) }
-        guard let targetStep = findStep(for: step) else { return }
+        
+        guard let targetStep = findStep(for: step) else {
+            return
+        }
+        
         targetStep.result = result
         targetStep.duration = duration
     }
