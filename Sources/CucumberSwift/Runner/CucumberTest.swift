@@ -54,6 +54,27 @@ open class CucumberTest: XCTestCase {
         stubTests.forEach { stubsSuite.addTest($0) }
         rootSuite.addTest(stubsSuite)
 
+        let shardIndex = Int(ProcessInfo.processInfo.environment["CUCUMBER_SHARD_INDEX"] ?? "")
+        let totalShards = Int(ProcessInfo.processInfo.environment["CUCUMBER_TOTAL_SHARDS"] ?? "")
+        let isShardingEnabled = (shardIndex != nil && totalShards != nil && totalShards! > 1)
+
+        if isShardingEnabled {
+             print("🧩 Sharding ENABLED: Index \(shardIndex!) / Total \(totalShards!)")
+        }else {
+             print("❌ Sharding DISABLED: Index \(shardIndex ?? -1) / Total \(totalShards ?? -1)")
+        }
+        
+        // Helper to extract stable feature path for consistent sharding across simulators
+        // The full URI contains simulator-specific UUIDs that change per machine/run,
+        // so we extract only the relative path from "Features/" onwards
+        func stableFeaturePath(from uri: String) -> String {
+            if let range = uri.range(of: "Features/") {
+                return String(uri[range.lowerBound...])
+            }
+            // Fallback: use just the filename
+            return (uri as NSString).lastPathComponent
+        }
+
         let configuration = CucumberTestConfiguration.fromEnvironment()
         print("🔧 CucumberSwift Configuration: \(configuration)")
         switch configuration {
@@ -61,6 +82,14 @@ open class CucumberTest: XCTestCase {
             // Original behavior: each step is a separate test
             print("▶️ Using \(configuration) mode")
             for feature in Cucumber.shared.features.taggedElements(with: Cucumber.shared.environment, askImplementor: false) {
+                if isShardingEnabled, let shardIndex = shardIndex, let totalShards = totalShards {
+                    let stablePath = stableFeaturePath(from: feature.uri)
+                    let featureHash = abs(stablePath.stableHash)
+                    let targetShard = featureHash % totalShards
+                    print("🔀 Shard decision: '\(stablePath)' → hash=\(featureHash) → shard \(targetShard) (current=\(shardIndex))")
+                    if targetShard != shardIndex { continue }
+                }
+
                 let className = feature.title.toClassString() + readFeatureScenarioDelimiter()
 
                 for scenario in feature.scenarios.taggedElements(with: Cucumber.shared.environment, askImplementor: true) {
@@ -88,6 +117,14 @@ open class CucumberTest: XCTestCase {
             }
 
             for feature in Cucumber.shared.features.taggedElements(with: Cucumber.shared.environment, askImplementor: false) {
+                if isShardingEnabled, let shardIndex = shardIndex, let totalShards = totalShards {
+                    let stablePath = stableFeaturePath(from: feature.uri)
+                    let featureHash = abs(stablePath.stableHash)
+                    let targetShard = featureHash % totalShards
+                    print("🔀 Shard decision: '\(stablePath)' → hash=\(featureHash) → shard \(targetShard) (current=\(shardIndex))")
+                    if targetShard != shardIndex { continue }
+                }
+
                 print("🎯 Processing feature: \(feature.title) with \(feature.scenarios.count) scenarios")
 
                 // Create a feature-level suite for better organization
@@ -364,6 +401,7 @@ open class CucumberTest: XCTestCase {
         }
         
         let testCase = testCaseClass.init(selector: selector)
+        testCase.continueAfterFailure = true
         return testCase
     }
 

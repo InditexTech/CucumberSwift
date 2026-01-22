@@ -41,6 +41,14 @@ extension String {
         prefix(1).lowercased() + dropFirst()
     }
 
+    // djb2 hash algorithm
+    var stableHash: Int {
+        let unicodeScalars = self.unicodeScalars.map { $0.value }
+        return unicodeScalars.reduce(5381) {
+            ($0 << 5) &+ $0 &+ Int($1)
+        }
+    }
+
     func tokenize(locale: CFLocale) -> [String] {
         let inputRange = CFRange(location: 0, length: count)
         let flag = UInt(kCFStringTokenizerUnitWord)
