@@ -158,6 +158,9 @@ extension CucumberJSONReporter {
             description = ""
             line = scenario.location.line
             tags = scenario.tags.map { Tag(line: 1, name: $0) }
+            // Pre-populate steps from the scenario definition
+            // This ensures steps are recorded even if the test crashes before execution
+            steps = scenario.steps.map { Step($0) }
         }
     }
 
