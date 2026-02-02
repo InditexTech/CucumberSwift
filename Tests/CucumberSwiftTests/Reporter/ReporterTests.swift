@@ -167,6 +167,52 @@ class ReporterTests: XCTestCase {
             XCTFail("Failure by encode of json schema")
         }
     }
+
+    func testBeforeHooksAreWrittenToFile() throws {
+        let reporter = try XCTUnwrap(Cucumber.shared.reporters.compactMap { $0 as? CucumberJSONReporter }.first)
+        let step = Given(I: print(""))
+        let scenario = Scenario("S1") { step }
+        let feature = Feature("F1") { scenario }
+        reporter.testSuiteStarted(at: Date())
+        reporter.didStart(feature: feature, at: Date())
+        reporter.didStart(scenario: scenario, at: Date())
+        reporter.addBeforeHook(scenario: scenario, duration: 1_000_000, status: "passed", errorMessage: nil, location: "TestHook.before()")
+        reporter.didStart(step: step, at: Date())
+        reporter.didFinish(step: step, result: .passed, duration: .init(value: 1, unit: .seconds))
+
+        let actual = try XCTUnwrap(try JSONSerialization.jsonObject(with: JSONEncoder().encode(reporter.features)) as? [[AnyHashable: Any]])
+        XCTAssertEqual(actual.count, 1)
+        let scenarios = actual.first?["elements"] as? [[AnyHashable: Any]]
+        XCTAssertEqual(scenarios?.count, 1)
+        let before = scenarios?.first?["before"] as? [[AnyHashable: Any]]
+        XCTAssertEqual(before?.count, 1)
+        let result = before?.first?["result"] as? [AnyHashable: Any]
+        XCTAssertEqual(result?["status"] as? String, "passed")
+    }
+
+    func testAfterHooksAreWrittenToFile() throws {
+        let reporter = try XCTUnwrap(Cucumber.shared.reporters.compactMap { $0 as? CucumberJSONReporter }.first)
+        let step = Given(I: print(""))
+        let scenario = Scenario("S1") { step }
+        let feature = Feature("F1") { scenario }
+        reporter.testSuiteStarted(at: Date())
+        reporter.didStart(feature: feature, at: Date())
+        reporter.didStart(scenario: scenario, at: Date())
+        reporter.didStart(step: step, at: Date())
+        reporter.didFinish(step: step, result: .passed, duration: .init(value: 1, unit: .seconds))
+        reporter.addAfterHook(scenario: scenario, duration: 2_000_000, status: "failed", errorMessage: "Screenshot failed", location: "TestHook.after()")
+
+        let actual = try XCTUnwrap(try JSONSerialization.jsonObject(with: JSONEncoder().encode(reporter.features)) as? [[AnyHashable: Any]])
+        XCTAssertEqual(actual.count, 1)
+        let scenarios = actual.first?["elements"] as? [[AnyHashable: Any]]
+        XCTAssertEqual(scenarios?.count, 1)
+        let after = scenarios?.first?["after"] as? [[AnyHashable: Any]]
+        XCTAssertEqual(after?.count, 1)
+        let result = after?.first?["result"] as? [AnyHashable: Any]
+        XCTAssertEqual(result?["status"] as? String, "failed")
+        XCTAssertEqual(result?["error_message"] as? String, "Screenshot failed")
+    }
+
 }
 
 extension Feature {

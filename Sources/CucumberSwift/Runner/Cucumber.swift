@@ -138,18 +138,19 @@ import CucumberSwiftExpressions
     }
 
     func setupBeforeHooksFor(_ step: Step) {
-        if let feature = step.scenario?.feature,
-           !hookedFeatures.contains(where: { $0 === feature }) {
-            hookedFeatures.append(feature)
-            beforeFeatureHooks.forEach { $0.hook(feature) }
-            reporters.forEach { $0.didStart(feature: feature, at: Date()) }
-        }
         if let scenario = step.scenario,
            !hookedScenarios.contains(where: { $0 === scenario }) {
             hookedScenarios.append(scenario)
-            beforeScenarioHooks.forEach { $0.hook(scenario) }
+
             scenario.startDate = Date()
             reporters.forEach { $0.didStart(scenario: scenario, at: scenario.startDate) }
+
+            let hookStartDate = Date()
+            beforeScenarioHooks.forEach { $0.hook(scenario) }
+            let hookDuration = Measurement(value: Date().timeIntervalSince(hookStartDate), unit: UnitDuration.seconds)
+            reporters.forEach {
+                $0.didFinishBeforeScenario(scenario, result: .passed, duration: hookDuration, errorMessage: nil)
+            }
         }
     }
 
@@ -157,24 +158,22 @@ import CucumberSwiftExpressions
         if let scenario = step.scenario,
            let lastScenarioStep = scenario.steps.last,
            lastScenarioStep === step {
+
+            let hookStartDate = Date()
+            AfterHookFailureObserver.shared.startObserving()
+
             Cucumber.shared.afterScenarioHooks.forEach { $0.hook(scenario) }
+
+            let afterHookFailure = AfterHookFailureObserver.shared.stopObservingAndGetFailure()
+            let hookDuration = Measurement(value: Date().timeIntervalSince(hookStartDate), unit: UnitDuration.seconds)
+            let hookResult: Reporter.Result = afterHookFailure != nil
+                ? .failed(afterHookFailure)
+                : .passed
+            reporters.forEach { $0.didFinishAfterScenario(scenario, result: hookResult, duration: hookDuration, errorMessage: afterHookFailure) }
+
             let result: Reporter.Result = (scenario.steps.contains { $0.result == .failed }) ? .failed : .passed
-            reporters.forEach { $0.didFinish(scenario: scenario,
-                                             result: result,
-                                             duration: Measurement(value: Date().timeIntervalSince(scenario.startDate),
-                                                                   unit: .seconds))
-            }
-        }
-        if let feature = step.scenario?.feature,
-           let lastStep = feature.scenarios.last(where: { !$0.steps.isEmpty })?.steps.last,
-           lastStep === step {
-            Cucumber.shared.afterFeatureHooks.forEach { $0.hook(feature) }
-            let result: Reporter.Result = (feature.scenarios.contains { $0.steps.contains { $0.result == .failed } }) ? .failed : .passed
-            reporters.forEach { $0.didFinish(feature: feature,
-                                             result: result,
-                                             duration: Measurement(value: Date().timeIntervalSince(feature.startDate),
-                                                                   unit: .seconds))
-            }
+            let duration = Measurement(value: Date().timeIntervalSince(scenario.startDate), unit: UnitDuration.seconds)
+            reporters.forEach { $0.didFinish(scenario: scenario, result: result, duration: duration) }
         }
     }
 

@@ -78,6 +78,14 @@ class MockTestObserver: CucumberTestObserver {
     func didFinish(step: Step, result: Reporter.Result, duration: Measurement<UnitDuration>) {
         didFinishStep(step, result, duration)
     }
+
+    func didStartBeforeScenario(_ scenario: Scenario, at date: Date) { }
+
+    func didFinishBeforeScenario(_ scenario: Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>, errorMessage: String?) { }
+
+    func didStartAfterScenario(_ scenario: Scenario, at date: Date) { }
+
+    func didFinishAfterScenario(_ scenario: Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>, errorMessage: String?) { }
 }
 
 class CustomReporterTests: XCTestCase {

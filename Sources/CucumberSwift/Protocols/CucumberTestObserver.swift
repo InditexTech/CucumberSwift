@@ -18,4 +18,8 @@ public protocol CucumberTestObserver {
     func didFinish(feature: Feature, result: Reporter.Result, duration: Measurement<UnitDuration>)
     func didFinish(scenario: Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>)
     func didFinish(step: Step, result: Reporter.Result, duration: Measurement<UnitDuration>)
+    func didStartBeforeScenario(_ scenario: Scenario, at date: Date)
+    func didFinishBeforeScenario(_ scenario: Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>, errorMessage: String?)
+    func didStartAfterScenario(_ scenario: Scenario, at date: Date)
+    func didFinishAfterScenario(_ scenario: Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>, errorMessage: String?)
 }

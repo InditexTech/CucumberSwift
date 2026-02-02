@@ -178,8 +178,15 @@ open class CucumberTest: XCTestCase {
         
         let result = (try? XCTContext.runActivity(named: attemptNumber == 1 ? "Initial Attempt" : "Retry \(attemptNumber - 1)") { activity -> (failed: Bool, skipped: Bool, passed: Bool) in
             
+            // Execute and report before scenario hooks
+            let beforeHookStartTime = Date()
             Cucumber.shared.beforeScenarioHooks.forEach { $0.hook(scenario) }
-            
+            let beforeHookDuration = Measurement(value: Date().timeIntervalSince(beforeHookStartTime), unit: UnitDuration.seconds)
+            if shouldReportSteps {
+                Cucumber.shared.reporters.forEach {
+                    $0.didFinishBeforeScenario(scenario, result: .passed, duration: beforeHookDuration, errorMessage: nil)
+                }
+            }
             var attemptFailed = false
             var attemptSkipped = false
             
@@ -233,8 +240,21 @@ open class CucumberTest: XCTestCase {
                 }
             }
             
+            // Execute and report after scenario hooks
+            let afterHookStartTime = Date()
+            AfterHookFailureObserver.shared.startObserving()
             Cucumber.shared.afterScenarioHooks.forEach { $0.hook(scenario) }
-            
+            let afterHookFailure = AfterHookFailureObserver.shared.stopObservingAndGetFailure()
+            let afterHookDuration = Measurement(value: Date().timeIntervalSince(afterHookStartTime), unit: UnitDuration.seconds)
+            let afterHookResult: Reporter.Result = afterHookFailure != nil
+                ? .failed(afterHookFailure)
+                : .passed
+            if shouldReportSteps {
+                Cucumber.shared.reporters.forEach {
+                    $0.didFinishAfterScenario(scenario, result: afterHookResult, duration: afterHookDuration, errorMessage: afterHookFailure)
+                }
+            }
+
             let hasFailedStep = scenario.steps.contains { $0.result == .failed }
             let hasSkippedStep = scenario.steps.contains { $0.result == .skipped }
             let allStepsPassed = scenario.steps.allSatisfy { $0.result == .passed }
@@ -311,6 +331,10 @@ open class CucumberTest: XCTestCase {
                 
                 // If test passed on a non-last attempt, we need to report those steps now
                 if !isLastAttempt && attemptResult.passed {
+                    // Report before hook
+                    Cucumber.shared.reporters.forEach {
+                        $0.didFinishBeforeScenario(scenario, result: .passed, duration: Measurement(value: 0, unit: UnitDuration.seconds), errorMessage: nil)
+                    }
                     for step in scenario.steps {
                         if step.result != .pending {
                             Cucumber.shared.reporters.forEach {
@@ -318,6 +342,10 @@ open class CucumberTest: XCTestCase {
                                 $0.didFinish(step: step, result: step.result, duration: step.executionDuration)
                             }
                         }
+                    }
+
+                    Cucumber.shared.reporters.forEach {
+                        $0.didFinishAfterScenario(scenario, result: .passed, duration: Measurement(value: 0, unit: UnitDuration.seconds), errorMessage: nil)
                     }
                 }
                 
@@ -466,8 +494,18 @@ open class CucumberTest: XCTestCase {
         let isLastScenario = scenarioIndex == totalScenarios - 1
 
         testCase.addTeardownBlock {
-            // Execute after scenario hooks
+            // Execute and report after scenario hooks
+            let afterHookStartTime = Date()
+            AfterHookFailureObserver.shared.startObserving()
             Cucumber.shared.afterScenarioHooks.forEach { $0.hook(scenario) }
+            let afterHookFailure = AfterHookFailureObserver.shared.stopObservingAndGetFailure()
+            let afterHookDuration = Measurement(value: Date().timeIntervalSince(afterHookStartTime), unit: UnitDuration.seconds)
+            let afterHookResult: Reporter.Result = afterHookFailure != nil
+                ? .failed(afterHookFailure)
+                : .passed
+            Cucumber.shared.reporters.forEach {
+                $0.didFinishAfterScenario(scenario, result: afterHookResult, duration: afterHookDuration, errorMessage: afterHookFailure)
+            }
             // Notify all reporters
             let scenarioResult: Reporter.Result =
                 (scenario.steps.contains { $0.result == .failed }) ? .failed : .passed
@@ -610,7 +648,14 @@ extension Scenario {
             // Notify reporters and execute before scenario hooks
             self.startDate = Date()
             Cucumber.shared.reporters.forEach { $0.didStart(scenario: self, at: self.startDate) }
+
+            // Execute and report before scenario hooks
+            let beforeHookStartTime = Date()
             Cucumber.shared.beforeScenarioHooks.forEach { $0.hook(self) }
+            let beforeHookDuration = Measurement(value: Date().timeIntervalSince(beforeHookStartTime), unit: UnitDuration.seconds)
+            Cucumber.shared.reporters.forEach {
+                $0.didFinishBeforeScenario(self, result: .passed, duration: beforeHookDuration, errorMessage: nil)
+            }
 
             for step in self.steps {
                 let startTime = Date()

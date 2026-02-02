@@ -89,11 +89,89 @@ public class CucumberJSONReporter: CucumberTestObserver {
         targetStep.duration = duration
     }
 
+    public func didFinishBeforeScenario(_ scenario: CucumberSwift.Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>, errorMessage: String?) {
+        defer { try? encoder.encode(features).write(to: reportURL) }
+        guard let targetScenario = findScenarioByScenario(scenario) else { return }
+
+        var status = "passed"
+        var hookErrorMessage: String? = errorMessage
+        if case .failed(let err) = result {
+            status = "failed"
+            if hookErrorMessage == nil {
+                hookErrorMessage = err
+            }
+        }
+
+        let durationNanos = Int64(duration.converted(to: .nanoseconds).value)
+        let hook = Hook(
+            result: HookResult(duration: durationNanos, status: status, error_message: hookErrorMessage),
+            match: HookMatch(location: "BeforeScenario")
+        )
+        targetScenario.before.append(hook)
+    }
+
+    public func didFinishAfterScenario(_ scenario: CucumberSwift.Scenario, result: Reporter.Result, duration: Measurement<UnitDuration>, errorMessage: String?) {
+        defer { try? encoder.encode(features).write(to: reportURL) }
+        guard let targetScenario = findScenarioByScenario(scenario) else { return }
+
+        var status = "passed"
+        var hookErrorMessage: String? = errorMessage
+        if case .failed(let err) = result {
+            status = "failed"
+            if hookErrorMessage == nil {
+                hookErrorMessage = err
+            }
+        }
+
+        let durationNanos = Int64(duration.converted(to: .nanoseconds).value)
+        let hook = Hook(
+            result: HookResult(duration: durationNanos, status: status, error_message: hookErrorMessage),
+            match: HookMatch(location: "AfterScenario")
+        )
+        targetScenario.after.append(hook)
+    }
+
+    public func didStartBeforeScenario(_ scenario: CucumberSwift.Scenario, at date: Date) {}
+
+    public func didStartAfterScenario(_ scenario: CucumberSwift.Scenario, at date: Date) {}
+
+    public func addBeforeHook(scenario: CucumberSwift.Scenario, duration: Int64, status: String, errorMessage: String?, location: String) {
+        defer { try? encoder.encode(features).write(to: reportURL) }
+        guard let targetScenario = findScenarioByScenario(scenario) else { return }
+        let hook = Hook(
+            result: HookResult(duration: duration, status: status, error_message: errorMessage),
+            match: HookMatch(location: location)
+        )
+        targetScenario.before.append(hook)
+    }
+
+    public func addAfterHook(scenario: CucumberSwift.Scenario, duration: Int64, status: String, errorMessage: String?, location: String) {
+        print("🎯 addAfterHook called for scenario: \(scenario.title)")
+        defer { try? encoder.encode(features).write(to: reportURL) }
+        guard let targetScenario = findScenarioByScenario(scenario) else {
+            print("🎯 findScenarioByScenario returned nil!")
+            return
+        }
+        print("🎯 Adding hook to scenario: \(targetScenario.name)")
+        let hook = Hook(
+            result: HookResult(duration: duration, status: status, error_message: errorMessage),
+            match: HookMatch(location: location)
+        )
+        targetScenario.after.append(hook)
+    }
+
     // MARK: - Private Helper Methods
 
     private func findFeature(for scenario: CucumberSwift.Scenario) -> Feature? {
         return features.first { feature in
             feature.uri == scenario.feature?.uri && feature.name == scenario.feature?.title
+        }
+    }
+
+    private func findScenarioByScenario(_ scenario: CucumberSwift.Scenario) -> Scenario? {
+        guard let feature = findFeature(for: scenario) else { return nil }
+        return feature.elements.first {
+            $0.name == scenario.title && $0.line == scenario.location.line
         }
     }
 
@@ -118,6 +196,24 @@ extension CucumberJSONReporter {
     struct Tag: Encodable {
         let line: UInt
         let name: String
+    }
+    struct Hook: Encodable {
+        var result: HookResult
+        var match: HookMatch
+    }
+    struct HookResult: Encodable {
+        var duration: Int64
+        var status: String
+        var error_message: String?
+
+        init(duration: Int64, status: String, error_message: String? = nil) {
+            self.duration = duration
+            self.status = status
+            self.error_message = error_message
+        }
+    }
+    struct HookMatch: Encodable {
+        var location: String
     }
     class Feature: Encodable {
         let uri: String
@@ -149,6 +245,8 @@ extension CucumberJSONReporter {
         var steps: [Step] = []
         var line: UInt
         var tags: [Tag] = []
+        var before: [Hook] = []
+        var after: [Hook] = []
 
         init(_ scenario: CucumberSwift.Scenario) {
 //            #warning("Add better id logic so all whitespace is replaced")
